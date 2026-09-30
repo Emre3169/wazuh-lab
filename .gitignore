@@ -1,0 +1,5 @@
+# Never commit credentials: the install tar holds every Wazuh password.
+secrets/
+*.tar
+.env
+# screenshots/ is committed on purpose.
