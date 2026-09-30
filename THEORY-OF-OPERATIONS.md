@@ -130,15 +130,9 @@ What was observed, as of 12:23 UTC:
 | Indexer authentication errors | none; no indexer warnings since 12:10 |
 | Errors logged | one `VulnerabilityScannerFacade::start: Write failed` at 11:59:04, during the install, in the same second the installer rewrote the indexer credentials in the keystore |
 
-So the break is between **modulesd's indexer-connector and the indexer**. The alerts path
-(filebeat) works.
-
-Next steps, not yet done:
-1. Allow for the manager's first scan (the docs say it can take up to an hour), then
-   re-check the counts.
-2. Set `wazuh_modules.debug=2` in `local_internal_options.conf` to see what the connector is
-   doing.
-3. Re-write the indexer credentials into the keystore and restart the manager.
+The first reading, that the indexer-connector couldn't deliver, turned out to be **wrong**.
+The debug run showed the connector delivers fine. The scanner simply never scans the manager.
+See §7.
 
 rsync stays downgraded and held so a working scan will find it. Undo with
 `triggers/vuln-downgrade.sh --revert`.
@@ -153,3 +147,49 @@ rsync stays downgraded and held so a working scan will find it. Undo with
 | unattended-upgrades | It would quietly re-patch rsync, hence the `apt-mark hold` |
 | `UMASK 027` | `install.sh` and `configure.sh` set `umask 022` so Wazuh's service users can read their own files |
 | Mac on battery with 1-minute sleep | The first install attempt died when the Mac idle-slept for 16 minutes during the API step, and the installer rolled itself back. It succeeded on AC power, run in the foreground. |
+
+## 7. Open issues
+
+### Vulnerability detection doesn't scan the manager (agent 000)
+
+**Status:** open as of 2026-09-30 13:10 UTC. The Vulnerability Detection dashboard is empty.
+
+**Ruled out, in order:**
+
+| Attempt | Result |
+|---------|--------|
+| Waited about 10 min after the rsync downgrade and manager restart | 0 vulnerabilities, 0 packages in `wazuh-states-*` |
+| Re-wrote the indexer credentials into the keystore (`wazuh-keystore -f indexer`) | credentials get HTTP 200 from the indexer; counts still 0 |
+| Deleted `queue/vd`, `queue/vd_updater` and `queue/indexer`, then a clean feed download with no restarts | feed completed in 304 s (9.9 GB) and triggered a re-scan; counts still 0 after 20 min |
+| Checked the `<indexer>` block | host `https://127.0.0.1:9200` matches the indexer's binding; all 3 cert files exist (root:root 400); TLS verifies |
+| `wazuh_modules.debug=2`, one restart, 3 min of debug logs | see below |
+
+**What debug logging showed** (13:06–13:09 UTC):
+- The indexer-connector **does** reach the indexer. Its bulk responses say `"errors":false`.
+  Everything it sent was **deletes**: 32 for `inventory-processes` and 7 for
+  `inventory-ports`, meaning processes and ports that ended. It sent no inserts at all.
+- The key line from the vulnerability scanner:
+  `vulnerabilityScanPolicyChange(): DEBUG: Vulnerability scanner in manager still disabled`,
+  followed by `handlePolicyChanges(): No policy has changed or no action is needed for the manager`.
+- The package inventory itself exists: wazuh-db holds 711 packages for agent 000,
+  including rsync `3.2.7-1ubuntu1`.
+
+**Diagnosis:** the scanner's policy treats scanning of the manager's own packages as
+**disabled**. Agent 000 is the only agent, so nothing is ever scanned or indexed. The loss is
+not on the network or indexer side. The syscollector wodle on the manager *is* enabled
+(`<disabled>no</disabled>`, `<packages>yes</packages>`), so it's still unexplained why the
+scanner considers the manager disabled. The cause is inside Wazuh 4.14.8's scan-policy logic,
+not in this lab's `ossec.conf` edits (the flow was the same before `configure.sh`, as §5.3
+shows).
+
+**Next steps, not yet done:**
+1. Check the Wazuh 4.14 documentation and issue tracker for how manager scanning is enabled.
+   There may be a separate setting, or a known issue on single-node or arm64 installs.
+2. Get a **second agent**. The Windows VM agent (PLAN.md §5) is scanned by the agent path,
+   not the manager path, so if the problem is only the manager policy, windows-lab should
+   show vulnerabilities.
+3. Or enroll a lightweight Linux agent on another VM as a control.
+
+**Leftovers:** `wazuh_modules.debug=2` was reverted in `local_internal_options.conf` but stays
+active until the next manager restart. At idle it adds almost nothing to `ossec.log` (it
+measured 0 KB/min); the 62,908 debug lines were a one-off burst at startup.
