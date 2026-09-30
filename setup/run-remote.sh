@@ -36,7 +36,8 @@ SSH_OPTS=(-F "$SSH_CONFIG"
 close_master() { ssh "${SSH_OPTS[@]}" -O exit "$HOST" 2> /dev/null || true; }
 trap close_master EXIT
 
-# sshd may still be starting after a VM boot: at most 10 tries, 5 s apart.
+# sshd may still be starting after a VM boot: at most 10 tries, 10 s apart. Each failed
+# try is a new connection, and ufw's limit rejects a 7th within 30 s, so never go faster.
 tries=0
 until ssh "${SSH_OPTS[@]}" "$HOST" true 2> /dev/null; do
   tries=$((tries + 1))
@@ -44,7 +45,7 @@ until ssh "${SSH_OPTS[@]}" "$HOST" true 2> /dev/null; do
     echo "cannot reach $HOST after 10 tries" >&2
     exit 1
   fi
-  sleep 5
+  sleep 10
 done
 
 if [[ $MODE == wait ]]; then

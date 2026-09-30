@@ -173,7 +173,8 @@ for loc, fmt in [("/var/log/auth.log", "syslog"), ("/var/log/audit/audit.log", "
     l = ET.SubElement(lf, "location"); l.text = loc; l.tail = "\n  "
     change(f"localfile {loc} ({fmt})")
 
-out = ET.tostring(root, encoding="unicode")
+# short_empty_elements=False keeps "<key></key>" as written instead of "<key />".
+out = ET.tostring(root, encoding="unicode", short_empty_elements=False)
 out = re.sub(r"^<lab_root>", "", out)
 out = re.sub(r"</lab_root>$", "", out)
 # ElementTree escapes ">" in text; a bare ">" is valid XML and is what Wazuh's parser expects.
