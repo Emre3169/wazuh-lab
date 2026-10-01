@@ -1,13 +1,13 @@
 # Network diagram
 
-The real values from the installed lab (2026-09-30): Wazuh 4.14.8 all-in-one on ubuntu-lab,
-behind UTM's Shared (NAT) network.
+The real values from the installed lab: Wazuh 4.14.8 all-in-one on ubuntu-lab (2026-09-30),
+with windows-lab enrolled as agent 001 (2026-10-01), both on UTM's Shared (NAT) network.
 
 ```mermaid
 flowchart LR
   subgraph mac["MacBook Air (host)"]
     browser["Browser<br/>https://192.168.64.2"]
-    term["Terminal<br/>ssh -F hardening-lab/.ssh/config"]
+    term["Terminal<br/>ssh -F hardening-lab/.ssh/config<br/>(ubuntu-lab, windows-lab)"]
   end
 
   subgraph utm["UTM Shared network 192.168.64.0/24 (NAT, gateway 192.168.64.1)"]
@@ -20,7 +20,11 @@ flowchart LR
       fb["filebeat"]
       idx[("wazuh-indexer<br/>127.0.0.1:9200<br/>heap 2 GB")]
     end
-    win["windows-lab (planned)<br/>Wazuh agent"]
+    subgraph winvm["windows-lab 192.168.64.3 (Windows 11 Pro ARM64, hardened)"]
+      wfw{{"Windows Firewall<br/>in: Block, 22 from 192.168.64.0/24<br/>out: Allow"}}
+      wagent["Wazuh agent 001 v4.14.8 (x86, emulated)<br/>eventchannel · syscheck · syscollector · SCA"]
+      sshd["OpenSSH Server<br/>(PowerShell shell)"]
+    end
   end
 
   internet(("packages.wazuh.com<br/>cti.wazuh.com"))
@@ -32,7 +36,8 @@ flowchart LR
   agent0 -- "local queue" --> mgr
   mgr -- "alerts.json" --> fb -- "9200 (localhost)" --> idx
   mgr -- "states (indexer-connector)" --> idx
-  win -. "1515 enroll · 1514 events" .-> ufw -.-> mgr
+  wagent -- "1515 enroll · 1514 events (outbound)" --> ufw --> mgr
+  term -- "22/tcp" --> wfw --> sshd
   mgr -- "vulnerability feed (outbound 443)" --> internet
 ```
 
@@ -47,6 +52,9 @@ flowchart LR
 | 55000/tcp | wazuh-apid | 0.0.0.0 | **VM only** (ufw blocks it) | the dashboard uses it over localhost |
 | 9200/tcp | wazuh-indexer | 127.0.0.1 | **VM only** (not bound externally) | OpenSearch; filebeat, dashboard, indexer-connector |
 | 1516/tcp | cluster | not listening | nobody | single node; no cluster |
+
+windows-lab opens connections *out* to 1514/1515 (its own inbound stays blocked except SSH from
+the subnet). Checked with `Test-NetConnection` from windows-lab: both succeed.
 
 From the Mac, 443 returns the login page. 9200 and 55000 both refuse connections (checked with
 `nc -z` on 2026-09-30).

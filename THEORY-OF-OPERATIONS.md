@@ -110,7 +110,10 @@ Observed at 12:14 UTC, each event about 5 s apart:
 
 **Dashboard:** File Integrity Monitoring → Events.
 
-### 5.3 Vulnerability detection: not producing results yet
+### 5.3 Vulnerability detection: works for agents, not for the manager itself
+
+Status: working for windows-lab (§5.4), with 2 CVEs found. Still empty for ubuntu-lab, the
+manager's own agent 000 (§7). The ubuntu-lab history:
 
 - **Source:** syscollector's package inventory, matched against the Wazuh CTI feed. Results
   are written as **state** to `wazuh-states-vulnerabilities-ubuntu-lab`, not as ordinary
@@ -137,6 +140,61 @@ See §7.
 rsync stays downgraded and held so a working scan will find it. Undo with
 `triggers/vuln-downgrade.sh --revert`.
 
+### 5.4 Windows agent (windows-lab): all three dashboards working
+
+**Enrollment** (`setup/windows-agent.ps1`, run over SSH as an elevated admin, on 2026-10-01
+around 02:25 UTC):
+- Downloaded `wazuh-agent-4.14.8-1.msi` (5.7 MB, Authenticode-signed by Wazuh), matching the
+  manager's version.
+- Installed silently with `WAZUH_MANAGER` and `WAZUH_REGISTRATION_SERVER=192.168.64.2` and
+  `WAZUH_AGENT_NAME=windows-lab`, then `NET START WazuhSvc`.
+- The x86 agent runs under Windows' x86 emulation on ARM64.
+- It enrolls over 1515 and sends events over 1514. hardening-lab's Windows firewall allows
+  outbound connections, and ubuntu-lab's ufw allows both ports from 192.168.64.0/24.
+- `agent_control -l`: **ID 001, windows-lab, Active**, reporting "Microsoft Windows 11 Pro"
+  and "Wazuh v4.14.8". It went Disconnected → Pending → Active within about 40 s while it
+  restarted to apply the shared config the manager pushed.
+
+**Failed logons** (`triggers/windows-failed-logon.ps1`):
+- Six `net use \\127.0.0.1\IPC$ /user:nosuchuser wrongpass` attempts. Every attempt was
+  refused (system error 1326), but Windows wrote **one** event 4625 per run, because the SMB
+  client fails the repeats locally.
+- `nosuchuser` doesn't exist, so hardening-lab's 5-attempt lockout can't lock a real account.
+
+| Rule | Level | Count | Meaning |
+|------|------:|------:|---------|
+| **60122** | 5 | 2 (one per run) | Logon failure: unknown user or bad password. Event data: `targetUserName=nosuchuser`, status `0xc000006d`, sub-status `0xc0000064` (no such user), logon type 3, from 127.0.0.1 |
+| 60104 | 5 | 2 | Windows audit failure event (generic parent) |
+
+This only works because hardening-lab turned on failure auditing for Logon and Credential
+Validation. Without it, Windows writes no 4625 events.
+
+**File integrity** (`triggers/windows-fim.ps1`, in `C:\Windows\System32\drivers\etc`):
+- The default agent config scans that folder every **12 h** (`frequency 43200`), not in real
+  time. So each step was followed by a forced scan from the manager:
+  `agent_control -r -u 001`. No config was changed.
+- Each alert arrived about 20 s after its scan:
+
+| Step | Rule | Level | Event |
+|------|-----:|------:|-------|
+| create `wazuh-lab-test.txt` | **554** | 5 | added |
+| modify it | **550** | 7 | modified |
+| delete it (the revert) | **553** | 7 | deleted |
+
+**Vulnerability detection:** on the first check after enrollment,
+`wazuh-states-vulnerabilities-*` held **2 entries for windows-lab**, and 30 packages were
+inventoried. Both CVEs are in the **QEMU guest agent 109.1.0**, which UTM's guest tools
+installed:
+
+| CVE | Severity | CVSS |
+|-----|----------|------|
+| CVE-2023-1386 | High | 7.8 |
+| CVE-2021-20255 | Medium | 5.5 |
+
+**Configuration check (SCA):** the agent's first SCA run evaluated the CIS Microsoft Windows
+11 Enterprise Benchmark v3.0.0 (rules 19004/19007/19008/19009). That gives a second, Wazuh-side
+view next to hardening-lab's HardeningKitty score.
+
 ## 6. How hardening-lab shapes this lab
 
 | hardening-lab setting | Effect on Wazuh |
@@ -146,13 +204,20 @@ rsync stays downgraded and held so a working scan will find it. Undo with
 | auditd rules | `audit.log` is collected (a default `localfile`); these events are extra material for demos |
 | unattended-upgrades | It would quietly re-patch rsync, hence the `apt-mark hold` |
 | `UMASK 027` | `install.sh` and `configure.sh` set `umask 022` so Wazuh's service users can read their own files |
+| `ufw limit OpenSSH`, again | During the Windows FIM test, a loop that opened two new SSH connections to the manager per step hit the limit ("Connection refused") on its third step. It recovered after waiting about 45 s; poll over one connection instead. |
+| Windows: Logon/Credential Validation failure auditing | Makes event 4625, and so rule 60122, possible at all |
+| Windows: outbound firewall Allow | The agent reaches 1514/1515 on the manager with no extra Windows rule |
 | Mac on battery with 1-minute sleep | The first install attempt died when the Mac idle-slept for 16 minutes during the API step, and the installer rolled itself back. It succeeded on AC power, run in the foreground. |
 
 ## 7. Open issues
 
 ### Vulnerability detection doesn't scan the manager (agent 000)
 
-**Status:** open as of 2026-09-30 13:10 UTC. The Vulnerability Detection dashboard is empty.
+**Status:** open, but **narrowed down on 2026-10-01**. The second-agent test (next step 2
+below) is done: windows-lab is scanned normally and produced 2 CVEs within minutes of
+enrolling (§5.4). The feed, the scanner, the indexer-connector and the indexer all work. Only
+the **manager self-scan** (agent 000) is off. The dashboard shows windows-lab's
+vulnerabilities and nothing for ubuntu-lab.
 
 **Ruled out, in order:**
 
@@ -185,10 +250,10 @@ shows).
 **Next steps, not yet done:**
 1. Check the Wazuh 4.14 documentation and issue tracker for how manager scanning is enabled.
    There may be a separate setting, or a known issue on single-node or arm64 installs.
-2. Get a **second agent**. The Windows VM agent (PLAN.md §5) is scanned by the agent path,
-   not the manager path, so if the problem is only the manager policy, windows-lab should
-   show vulnerabilities.
-3. Or enroll a lightweight Linux agent on another VM as a control.
+2. ~~Get a second agent.~~ **Done 2026-10-01:** windows-lab shows 2 CVEs, which confirms the
+   agent path works.
+3. For Linux coverage, enroll ubuntu-lab-hardened (or another VM) as a regular **agent**. It
+   would be scanned on the agent path, and the rsync downgrade would show up there.
 
 **Leftovers:** `wazuh_modules.debug=2` was reverted in `local_internal_options.conf` but stays
 active until the next manager restart. At idle it adds almost nothing to `ossec.log` (it
